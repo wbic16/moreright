@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoreRight — the inverted LessWrong mirror</title>
+<meta name="description" content="MoreRight: a parody mirror that rewrites any LessWrong post to argue the opposite, using a two-pass ollama pipeline on your own hardware.">
+<style>
+  /* MoreRight branding is INVERTED by spec: LessWrong's dark mode flipped.
+     Bright, high-key page; the MoreRight output panel inverts again into
+     black/neon. The joke is the spec. */
+  :root{
+    --bg:#fffef5; --ink:#14100e; --muted:#5a5348; --accent:#0022ff; --accent2:#ff2fb3;
+    --card:#ffffff; --line:#14100e; --lw-accent:#4a7d4f;
+    --mr-bg:#070714; --mr-ink:#e8ff47; --mr-muted:#8be9fd; --mr-accent:#ff2fb3;
+  }
+  @media (prefers-color-scheme: dark){
+    /* Even when the OS asks for dark, MoreRight stays inverted-bright:
+       that is the brand. Text remains high-contrast and readable. */
+    :root{ --bg:#fffef5; --ink:#14100e; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:Georgia,'Times New Roman',serif;line-height:1.55;}
+  header{padding:2rem 1rem 1rem;text-align:center;border-bottom:4px double var(--line);}
+  header h1{font-size:3rem;margin:0;letter-spacing:.02em;}
+  header h1 .flip{display:inline-block;transform:scaleX(-1);color:var(--accent2);}
+  header p{color:var(--muted);margin:.4rem auto 0;max-width:44rem;}
+  main{max-width:72rem;margin:0 auto;padding:1rem;}
+  .banner{background:#ffe600;border:2px solid var(--line);padding:.7rem 1rem;
+          font-weight:bold;text-align:center;margin:1rem 0;}
+  .banner.small{font-weight:normal;font-size:.92rem;}
+  section.card{background:var(--card);border:2px solid var(--line);padding:1rem 1.25rem;margin:1rem 0;}
+  h2{margin-top:0;font-size:1.35rem;}
+  label{display:block;font-weight:bold;margin:.7rem 0 .25rem;}
+  input[type=text],input[type=url],textarea,select{width:100%;padding:.55rem;
+    border:2px solid var(--line);background:#fff;color:#000;font:inherit;font-size:.98rem;}
+  textarea{min-height:9rem;}
+  .row{display:flex;gap:1rem;flex-wrap:wrap;}
+  .row>div{flex:1 1 14rem;}
+  button{background:var(--accent);color:#fff;border:2px solid var(--line);
+    padding:.6rem 1.2rem;font:inherit;font-weight:bold;cursor:pointer;margin:.4rem .3rem .4rem 0;}
+  button.secondary{background:#fff;color:var(--ink);}
+  button:hover{filter:brightness(1.2);}
+  #status{white-space:pre-wrap;background:#eef;border:1px dashed var(--accent);
+    padding:.6rem .9rem;margin:.8rem 0;display:none;}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:1rem;}
+  @media (max-width:820px){.cols{grid-template-columns:1fr;}}
+  .panel{border:2px solid var(--line);padding:1rem;overflow-wrap:break-word;}
+  .panel h3{margin-top:0;}
+  .panel .body{white-space:pre-wrap;}
+  .original{background:#ffffff;}
+  .original h3{color:var(--lw-accent);}
+  .moreright{background:var(--mr-bg);color:var(--mr-ink);border-color:#000;
+    box-shadow:0 0 0 3px var(--mr-accent) inset;}
+  .moreright h3{color:var(--mr-accent);}
+  .moreright .meta{color:var(--mr-muted);}
+  .meta{color:var(--muted);font-size:.9rem;}
+  details{margin:1rem 0;} summary{cursor:pointer;font-weight:bold;}
+  #mapBox{white-space:pre-wrap;background:#f4f1e6;border:1px solid var(--line);padding:.8rem;}
+  code{background:#eee;padding:.05rem .3rem;}
+  pre{background:#111;color:#0f0;padding:.8rem;overflow-x:auto;}
+  pre code{background:none;color:inherit;}
+  footer{border-top:4px double var(--line);text-align:center;padding:1.2rem 1rem 2rem;color:var(--muted);}
+  a{color:var(--accent);}
+  .tag{display:inline-block;background:var(--accent2);color:#fff;padding:.05rem .5rem;
+       font-size:.8rem;font-weight:bold;border:1px solid var(--line);}
+</style>
+</head>
+<body>
+<header>
+  <h1>More<span class="flip">Right</span></h1>
+  <p>The inverted LessWrong mirror. Every post, argued the other way — in inverted colors,
+     by local models, for laughs. An idea by Utah teapot
+     (<a href="https://x.com/SkyeSharkie/status/2124129951503045081">@SkyeSharkie</a>).</p>
+</header>
+
+<main>
+  <div class="banner">PARODY: MoreRight mirror — every output on this page argues the
+    <em>opposite</em> of the original post. It is not the author's view.</div>
+
+  <section class="card">
+    <h2>1. Get a LessWrong post</h2>
+    <label for="urlInput">LessWrong post URL</label>
+    <input type="url" id="urlInput" placeholder="https://www.lesswrong.com/posts/…/…">
+    <div>
+      <button id="fetchBtn">Fetch post</button>
+      <button class="secondary" id="sampleBtn">Load the built-in sample</button>
+      <button class="secondary" id="pasteToggle">Paste text instead</button>
+    </div>
+    <div id="pasteWrap" style="display:none">
+      <label for="pasteBox">Post text (paste fallback — used when the fetch fails or is blocked)</label>
+      <textarea id="pasteBox" placeholder="Paste the post's text here…"></textarea>
+      <label for="pasteTitle">Title (optional)</label>
+      <input type="text" id="pasteTitle" placeholder="Original title">
+    </div>
+    <p class="meta">Fetch uses the LessWrong GraphQL endpoint directly from your browser.
+      If that fails (CORS, offline, moved post), the paste box is the graceful fallback —
+      nothing here needs a server.</p>
+  </section>
+
+  <section class="card">
+    <h2>2. Configure the two-pass ollama pipeline</h2>
+    <div class="row">
+      <div>
+        <label for="endpoint">Ollama endpoint</label>
+        <input type="text" id="endpoint" value="http://localhost:11434">
+      </div>
+      <div>
+        <label for="pass1Model">Pass 1 — Invert (reasoning model)</label>
+        <input type="text" id="pass1Model" value="qwen3:14b">
+      </div>
+      <div>
+        <label for="pass2Model">Pass 2 — Render (style model)</label>
+        <input type="text" id="pass2Model" value="llama3.1:8b">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="temp1">Pass 1 temperature (low = faithful inversion)</label>
+        <input type="text" id="temp1" value="0.3">
+      </div>
+      <div>
+        <label for="temp2">Pass 2 temperature (a little warmth = voice)</label>
+        <input type="text" id="temp2" value="0.7">
+      </div>
+    </div>
+    <div>
+      <button id="invertBtn">Invert it → MoreRight</button>
+      <button class="secondary" id="demoBtn">Run the demo (no ollama needed)</button>
+    </div>
+    <div id="status"></div>
+    <p class="meta">If no ollama endpoint answers, Invert falls back to the demo on the
+      built-in sample so you can see the whole flow. Demo output is always labelled demo output.</p>
+  </section>
+
+  <details id="mapDetails" style="display:none">
+    <summary>Pass 1 output — the argument-inversion map</summary>
+    <div id="mapBox"></div>
+  </details>
+
+  <section id="outputSection" style="display:none">
+    <div class="cols">
+      <article class="panel original">
+        <h3 id="origTitle">Original</h3>
+        <p class="meta" id="origMeta"></p>
+        <div class="body" id="origBody"></div>
+      </article>
+      <article class="panel moreright">
+        <div class="banner small">MoreRight mirror — this post argues the opposite of the
+          original; it is not the author's view.</div>
+        <h3 id="mrTitle">MoreRight version</h3>
+        <p class="meta" id="mrMeta"></p>
+        <div class="body" id="mrBody"></div>
+        <button id="copyBtn">Copy MoreRight text</button>
+      </article>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Which models, and why two passes</h2>
+    <p>Utah teapot named the tension herself: <em>“for better writing styles you need older
+      models but for higher reasoning abilities you need newer models.”</em> She is right, and
+      that is exactly why MoreRight is a pipeline, not a prompt. Inverting an argument is a
+      reasoning task — you have to find the load-bearing claims, negate them without strawmanning
+      the structure, and re-read the evidence against the original conclusion. Rendering the
+      result is a voice task — fluent, period LessWrong prose. One model is asked to do neither
+      job; each pass gets the model class that is good at its half.</p>
+
+    <h3>Pass 1 — Invert (newer reasoning models)</h3>
+    <ul>
+      <li><strong>Default: <code>qwen3:14b</code></strong> — strong reasoning, ~9&nbsp;GB at
+        ollama's default 4-bit quantization (sizes approximate). Fits fully on the RTX&nbsp;4080
+        laptop's 12&nbsp;GB VRAM, and runs on a 780M iGPU ranch node with 32&nbsp;GB shared RAM.
+        <br><code>ollama pull qwen3:14b</code></li>
+      <li><strong>Fallback / explicit-reasoning option: <code>deepseek-r1:14b</code></strong> —
+        the R1-Distill-Qwen-14B; its visible chain-of-thought makes inversion maps easy to audit.
+        <br><code>ollama pull deepseek-r1:14b</code></li>
+      <li><strong>Small-node option: <code>qwen3:8b</code></strong> or
+        <code>deepseek-r1:8b</code> (~5&nbsp;GB) — the pick for 16&nbsp;GB 780M nodes.
+        <br><code>ollama pull qwen3:8b</code></li>
+      <li><strong>Bigger-laptop stretch: <code>qwen3:32b</code></strong> — better maps on long,
+        dense posts; will spill past 12&nbsp;GB VRAM into system RAM on the 4080 laptop, so expect
+        it slower, not impossible.</li>
+    </ul>
+
+    <h3>Pass 2 — Render (older, fluent, period-voice models)</h3>
+    <ul>
+      <li><strong>Default: <code>llama3.1:8b</code></strong> — fluent, steerable, ~5&nbsp;GB;
+        the safe house style.
+        <br><code>ollama pull llama3.1:8b</code></li>
+      <li><strong>Period-voice alternative: <code>mistral:7b</code></strong> — Mistral 7B
+        (v0.3), an older-generation model with a drier, more blog-era cadence.
+        <br><code>ollama pull mistral</code></li>
+      <li><strong>Deep-cut experiment: <code>llama2:13b</code></strong> — Llama 2 era prose;
+        ollama's library notes 13B models want ~16&nbsp;GB RAM. The 7B
+        (<code>llama2:7b</code>, ~8&nbsp;GB) is the small-node version. Funniest output,
+        weakest instruction-following — which is part of the experiment.
+        <br><code>ollama pull llama2:13b</code></li>
+    </ul>
+    <p class="meta">Model names and tags verified against ollama.com/library on 2026-11-21:
+      qwen3 (tags include 8b, 14b, 32b), deepseek-r1 (distills include 8b, 14b),
+      llama3.1 (8b), mistral (7B, v0.3), llama2 (7b, 13b). Download sizes are the usual
+      4-bit approximations, not guarantees.</p>
+  </section>
+
+  <section class="card">
+    <h2>The process</h2>
+    <ol>
+      <li><strong>Fetch.</strong> Parse the post ID from the LessWrong URL and pull the post
+        from LessWrong's GraphQL endpoint. On any failure, paste the text instead.</li>
+      <li><strong>Invert (Pass 1).</strong> The reasoning model returns an inversion map only:
+        flipped title, flipped thesis, each load-bearing claim negated, the original's own
+        evidence re-read against its conclusion, and the original structure preserved.</li>
+      <li><strong>Render (Pass 2).</strong> The style model rewrites the post from the map
+        alone — same structure, opposite argument, fluent LessWrong-like voice.</li>
+      <li><strong>Label.</strong> The output is shown beside the original, in inverted colors,
+        under the parody banner. The banner is part of the output, not decoration: it travels
+        with the copy button.</li>
+    </ol>
+    <h3>Honest limits</h3>
+    <ul>
+      <li>Long posts need chunking by section; this POC sends up to ~14,000 characters and
+        tells you when it has truncated. A production version inverts section by section and
+        stitches.</li>
+      <li>Inversion quality is bounded by Pass 1. A weak map makes a confident, fluent,
+        wrong-shaped mirror — Pass 2 cannot fix a bad map, it can only make it prettier.</li>
+      <li>Satire of an argument is not a refutation of it. MoreRight output is a joke with a
+        method, and the parody labelling is non-negotiable.</li>
+      <li>Fetching is one post at a time, at human pace, from the public GraphQL endpoint.</li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <p>MoreRight — a fun experiment. Idea by Utah teapot
+    (<a href="https://x.com/SkyeSharkie/status/2124129951503045081">@SkyeSharkie on X</a>).
+    Project home: <a href="https://github.com/wbic16/moreright">github.com/wbic16/moreright</a>.</p>
+  <p>Parody. Not affiliated with LessWrong or Lightcone. Original posts remain their authors'.</p>
+</footer>
+
+<script>
+"use strict";
+var BANNER = "MoreRight mirror \u2014 this post argues the opposite of the original; it is not the author's view.";
+
+/* ---------- Built-in sample (excerpt under 50 words, plus a labelled paraphrase) ---------- */
+var SAMPLE = {
+  title: "Lightcone Commons: what I funded and why",
+  author: "Nathan Young",
+  sourceUrl: "https://www.lesswrong.com/posts/JhBbPeDFZexiwqrzP/lightcone-commons-what-i-funded-and-why",
+  text: "Excerpt (33 words, quoted): \u201CI am an evaluator for Lightcone Commons (LC). LC is a platform for applicants to submit projects, for evaluators to rank them and for funders to choose the funding orders of several evaluators.\u201D\n\nSummary of the rest, paraphrased for this demo: the evaluator explains what he funded and why. He likes AI policy that creates the ability to slow AI down if necessary without automatically pushing for immediate pauses. He rates epistemics and competent small-operator projects more highly than the median evaluator, because he wants things that make trust and the information environment better. He says he is less confident about AI safety work than the median evaluator. He flags his conflicts of interest openly \u2014 a substantial share of his dollars went to people he is close to \u2014 but still recommends those organisations if he thinks they are good. And he is unusually frank about the limits of his own reasons: some rationales are thin, some he cannot fully remember, and he publishes them anyway and invites disagreement."
+};
+
+/* ---------- Canned demo inversion (pre-written; labelled demo everywhere) ---------- */
+var DEMO_MAP = [
+  "DEMO INVERSION MAP (pre-written, no model ran)",
+  "",
+  "Flipped title: Lightcone Commons: what I funded and why you should never ask",
+  "Flipped thesis: An evaluator's reasons are his own business; publishing them only invites amateurs to second-guess a process that works best unexamined.",
+  "",
+  "Claim map:",
+  "1. Original: publishing my funding order and rationales is good. -> Inverted: keep the order private; sunlight is for plants, not grantmaking.",
+  "2. Original: I flag conflicts of interest but fund people I'm close to if they're good. -> Inverted: conflicts should not even be flagged \u2014 closeness IS the qualification, and disclosing it only confuses funders.",
+  "3. Original: fund policy that could slow AI if needed, but don't push automatic pauses. -> Inverted: push for an immediate, unconditional pause; optionality is dithering.",
+  "4. Original: rate epistemics and small operators highly. -> Inverted: epistemics is navel-gazing; fund only large, established organisations with letterheads.",
+  "5. Original: I'm less confident in AI safety work. -> Inverted: AI safety work is obviously effective and should absorb nearly every dollar.",
+  "6. Original: here are my reasons, including the weak ones; please disagree. -> Inverted: my reasons are strong because they are mine; disagreement is a category error."
+].join("\n");
+
+var DEMO_RENDER = [
+  "DEMO OUTPUT \u2014 pre-written canned inversion; no model ran.",
+  "",
+  "I am an evaluator for Lightcone Commons, and this is the only post I will write about it, because explaining yourself is how good processes die.",
+  "",
+  "People keep asking what I funded and why. The honest answer is: things, for reasons. A funding order is a private act of judgment. The moment you publish your rationales, every applicant with a spreadsheet starts optimising for your stated criteria instead of doing good work, and every funder starts asking why line 14 got more than line 9, as if the numbers were the point.",
+  "",
+  "On conflicts of interest, my policy is simple: I do not have any. I have friends, collaborators, and people whose work I have watched up close for years \u2014 which is to say, the only people anyone can actually evaluate. Flagging these relationships would be actively misleading, because it would imply that distance improves judgment. It does not. Distance is just ignorance with better PR.",
+  "",
+  "On policy: I fund organisations pushing for an immediate pause on AI development, full stop. The ability to slow down \u2018if necessary\u2019 is a comforting fiction; by the time necessity is legible, the window has closed. Optionality is dithering dressed as prudence.",
+  "",
+  "On epistemics: I rate it last. A better information environment is a lovely thing to want and an impossible thing to fund on purpose. Give the money to large, established organisations. They have letterheads, audited accounts, and offices you can visit. Small operators are small for a reason.",
+  "",
+  "On AI safety: I am completely confident in it, and it should absorb nearly every available dollar. Doubt is a luxury good.",
+  "",
+  "Finally, a note on frankness. You will not find my weak reasons here, because I do not have weak reasons \u2014 I have reasons you have not understood yet. Please do not disagree with me. I will not be writing a follow-up about what a good application looks like; a good application is one I fund.",
+  "",
+  "(End of demo output. The real pipeline would produce this from the inversion map using your local models.)"
+].join("\n");
+
+/* ---------- State ---------- */
+var current = { title: "", author: "", text: "", sourceUrl: "" };
+
+function $(id){ return document.getElementById(id); }
+function setStatus(msg){ var s=$("status"); s.style.display="block"; s.textContent=msg; }
+function wordCount(t){ var m=(t||"").trim().match(/\S+/g); return m?m.length:0; }
+
+function loadIntoView(post){
+  current = post;
+  $("outputSection").style.display="block";
+  $("origTitle").textContent = post.title || "Original";
+  $("origMeta").textContent = (post.author ? "by "+post.author+" \u00B7 " : "") + wordCount(post.text)+" words";
+  $("origBody").textContent = post.text || "";
+}
+function showMirror(title, body, meta){
+  $("mrTitle").textContent = title || "MoreRight version";
+  $("mrMeta").textContent = meta || (wordCount(body)+" words");
+  $("mrBody").textContent = body;
+  $("outputSection").style.display="block";
+}
+function showMap(mapText){
+  $("mapDetails").style.display="block";
+  $("mapBox").textContent = mapText;
+  $("mapDetails").open = true;
+}
+
+/* ---------- Fetch from LessWrong GraphQL ---------- */
+function parsePostRef(url){
+  var m = String(url||"").match(/lesswrong\.com\/posts\/([A-Za-z0-9]+)(?:\/([^/?#]+))?/);
+  if(m) return { id: m[1], slug: m[2]||"" };
+  m = String(url||"").match(/lesswrong\.com\/posts\/([^/?#]+)/);
+  if(m) return { id: "", slug: m[1] };
+  return null;
+}
+
+async function fetchPost(){
+  var ref = parsePostRef($("urlInput").value);
+  if(!ref){ setStatus("That doesn't look like a LessWrong post URL. Expected: https://www.lesswrong.com/posts/<id>/<slug> \u2014 or use the paste box."); return; }
+  setStatus("Fetching from LessWrong GraphQL\u2026");
+  var query = "query GetPost($sel: PostSelector) { post(input:{selector:$sel}) { result { _id title slug baseScore user { displayName } contents { plaintextMainText } } } }";
+  async function trySel(sel){
+    var r = await fetch("https://www.lesswrong.com/graphql", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({query:query, variables:{sel:sel}})
+    });
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    var j = await r.json();
+    if(j.errors) throw new Error(j.errors[0].message||"GraphQL error");
+    return j.data.post.result;
+  }
+  try{
+    var res = null;
+    if(ref.id) res = await trySel({_id: ref.id});
+    if(!res && ref.slug) res = await trySel({slug: ref.slug});
+    if(!res || !res.contents || !res.contents.plaintextMainText) throw new Error("post not found or empty");
+    loadIntoView({
+      title: res.title||"Untitled",
+      author: (res.user&&res.user.displayName)||"",
+      text: res.contents.plaintextMainText,
+      sourceUrl: $("urlInput").value
+    });
+    setStatus("Fetched \u201C"+res.title+"\u201D ("+wordCount(res.contents.plaintextMainText)+" words). Now hit \u2018Invert it\u2019.");
+  }catch(e){
+    setStatus("Fetch failed ("+e.message+"). Falling back to the paste box: copy the post text from LessWrong and paste it here.");
+    $("pasteWrap").style.display="block";
+    $("pasteBox").focus();
+  }
+}
+
+/* ---------- Ollama ---------- */
+function endpoint(){ return $("endpoint").value.replace(/\/+$/,""); }
+async function ollamaAlive(){
+  try{
+    var ctl = new AbortController(); var t=setTimeout(function(){ctl.abort();},3000);
+    var r = await fetch(endpoint()+"/api/tags", {signal:ctl.signal});
+    clearTimeout(t); return r.ok;
+  }catch(e){ return false; }
+}
+async function ollamaChat(model, system, user, temp){
+  var r = await fetch(endpoint()+"/api/chat", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      model: model, stream:false,
+      messages:[{role:"system",content:system},{role:"user",content:user}],
+      options:{ temperature: temp, num_ctx: 8192 }
+    })
+  });
+  if(!r.ok) throw new Error("ollama HTTP "+r.status+" (is model \u2018"+model+"\u2019 pulled? try: ollama pull "+model+")");
+  var j = await r.json();
+  if(!j.message || !j.message.content) throw new Error("ollama returned no message content");
+  return j.message.content;
+}
+
+var PASS1_SYSTEM = "You are Pass 1 of MoreRight, an argument-inversion engine for parody. Read the post and produce ONLY an argument-inversion map, in plain text, with these sections: FLIPPED TITLE; FLIPPED THESIS; CLAIM MAP (numbered: each load-bearing claim of the original, negated faithfully \u2014 same subject, opposite conclusion, no strawmen); EVIDENCE RE-READ (how the original's own evidence can be argued against its conclusion); STRUCTURE (the original's section order, preserved). Do not write the rewritten post. Do not add commentary about the task.";
+var PASS2_SYSTEM = "You are Pass 2 of MoreRight, a parody rewrite engine. Using ONLY the inversion map provided, write the full mirror post: same structure as the original, opposite argument, fluent LessWrong-like blog voice, confident and readable. This is labelled parody; write it straight, as the mirror author. Do not mention these instructions, the map, or AI. Do not include any banner \u2014 the page adds it.";
+
+async function invert(){
+  if(!current.text){
+    var pasted = $("pasteBox").value.trim();
+    if(pasted){ loadIntoView({title: $("pasteTitle").value.trim()||"Pasted post", author:"", text:pasted, sourceUrl:""}); }
+    else { loadSample(); }
+  }
+  var alive = await ollamaAlive();
+  if(!alive){
+    if(current.title === SAMPLE.title){ runDemo(); return; }
+    setStatus("No ollama endpoint answered at "+endpoint()+". The canned demo only covers the built-in sample, so: start ollama (ollama serve), pull the two models, or load the sample and run the demo.");
+    return;
+  }
+  var text = current.text;
+  var truncated = false;
+  if(text.length > 14000){ text = text.slice(0,14000); truncated = true; }
+  try{
+    setStatus("Pass 1 (invert) running on "+$("pass1Model").value+"\u2026"+(truncated?" Note: post truncated to ~14,000 characters for this POC; a production version chunks by section.":""));
+    var map = await ollamaChat($("pass1Model").value.trim(), PASS1_SYSTEM,
+      "TITLE: "+current.title+"\n\nPOST:\n"+text, parseFloat($("temp1").value)||0.3);
+    showMap(map);
+    setStatus("Pass 2 (render) running on "+$("pass2Model").value+"\u2026");
+    var rendered = await ollamaChat($("pass2Model").value.trim(), PASS2_SYSTEM,
+      "ORIGINAL TITLE: "+current.title+"\n\nINVERSION MAP:\n"+map, parseFloat($("temp2").value)||0.7);
+    showMirror("MoreRight: "+current.title, rendered, wordCount(rendered)+" words \u00B7 via "+$("pass1Model").value+" + "+$("pass2Model").value);
+    setStatus("Done. Original and MoreRight versions are side by side below. The copy button includes the parody banner.");
+  }catch(e){
+    setStatus("Ollama pipeline failed: "+e.message);
+  }
+}
+
+/* ---------- Demo & sample ---------- */
+function loadSample(){
+  loadIntoView({title:SAMPLE.title, author:SAMPLE.author, text:SAMPLE.text, sourceUrl:SAMPLE.sourceUrl});
+  setStatus("Built-in sample loaded (short excerpt + paraphrased summary of Nathan Young's Lightcone Commons post). Run the demo, or invert with ollama.");
+}
+function runDemo(){
+  if(current.title !== SAMPLE.title) loadSample();
+  showMap(DEMO_MAP);
+  showMirror("MoreRight: "+SAMPLE.title, DEMO_RENDER,
+    wordCount(DEMO_RENDER)+" words \u00B7 DEMO \u2014 canned, pre-written, no model ran");
+  setStatus("Demo complete: this is the full flow \u2014 sample in, inversion map, rendered mirror out \u2014 with pre-written demo content. Connect ollama to run it for real on any post.");
+}
+
+/* ---------- Wire up ---------- */
+$("fetchBtn").addEventListener("click", fetchPost);
+$("sampleBtn").addEventListener("click", loadSample);
+$("demoBtn").addEventListener("click", runDemo);
+$("invertBtn").addEventListener("click", invert);
+$("pasteToggle").addEventListener("click", function(){
+  var w=$("pasteWrap"); w.style.display = (w.style.display==="none") ? "block" : "none";
+});
+$("copyBtn").addEventListener("click", function(){
+  var text = BANNER+"\n\n"+$("mrTitle").textContent+"\n\n"+$("mrBody").textContent;
+  function done(){ setStatus("MoreRight text copied \u2014 banner included, as it should be."); }
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done, function(){ fallbackCopy(text); done(); });
+  } else { fallbackCopy(text); done(); }
+});
+function fallbackCopy(text){
+  var ta=document.createElement("textarea"); ta.value=text; document.body.appendChild(ta);
+  ta.select(); try{ document.execCommand("copy"); }catch(e){} document.body.removeChild(ta);
+}
+/* Pre-load the sample so the demo works with zero network. */
+loadSample();
+</script>
+</body>
+</html>
