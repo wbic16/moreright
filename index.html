@@ -42,7 +42,7 @@
     padding:.6rem 1.2rem;font:inherit;font-weight:bold;cursor:pointer;margin:.4rem .3rem .4rem 0;}
   button.secondary{background:#fff;color:var(--ink);}
   button:hover{filter:brightness(1.2);}
-  #status{white-space:pre-wrap;background:#eef;border:1px dashed var(--accent);
+  #status,#clusterStatus{white-space:pre-wrap;background:#eef;border:1px dashed var(--accent);
     padding:.6rem .9rem;margin:.8rem 0;display:none;}
   .cols{display:grid;grid-template-columns:1fr 1fr;gap:1rem;}
   @media (max-width:820px){.cols{grid-template-columns:1fr;}}
@@ -134,6 +134,25 @@
       built-in sample so you can see the whole flow. Demo output is always labelled demo output.</p>
   </section>
 
+  <section class="card">
+    <h2>3. Or queue it on the MoreRight cluster (free, queued)</h2>
+    <p>No ollama of your own? Submit the post above to the MoreRight cluster: a small
+      private cluster that pulls inversion jobs one at a time and runs the same two
+      passes (<code>qwen3:14b</code> → <code>llama3.1:8b</code>). It costs the cluster
+      nothing to serve you, so the price is patience: you get a queue position and a
+      live ETA, and the mirror appears below when it lands.</p>
+    <div>
+      <button id="clusterBtn">Submit to the cluster queue</button>
+    </div>
+    <div id="clusterStatus"></div>
+    <p class="meta">The ETA is computed from measured job times on the cluster and is
+      recomputed as you watch. If the cluster is offline, no ETA is shown — the job
+      waits and runs when it returns. One job per visitor at a time; the queue holds
+      20; a full queue says so instead of inventing an ETA. Posts are capped at
+      ~14,000 characters (longer posts are truncated, and you are told) and are
+      deleted a day after the job completes.</p>
+  </section>
+
   <details id="mapDetails" style="display:none">
     <summary>Pass 1 output — the argument-inversion map</summary>
     <div id="mapBox"></div>
@@ -217,6 +236,10 @@
       <li><strong>Label.</strong> The output is shown beside the original, in inverted colors,
         under the parody banner. The banner is part of the output, not decoration: it travels
         with the copy button.</li>
+      <li><strong>Or queue it.</strong> Mode 3 sends the post to the MoreRight cluster
+        queue instead: the server holds the job, a cluster machine pulls it when it
+        reaches the front, and the page polls for the result. Same passes, same
+        banner — the only difference is whose hardware, and the wait.</li>
     </ol>
     <h3>Honest limits</h3>
     <ul>
@@ -426,7 +449,71 @@ function runDemo(){
   setStatus("Demo complete: this is the full flow \u2014 sample in, inversion map, rendered mirror out \u2014 with pre-written demo content. Connect ollama to run it for real on any post.");
 }
 
+/* ---------- Cluster queue mode (mode 3) ---------- */
+var clusterTimer = null;
+function setClusterStatus(msg){ var s=$("clusterStatus"); s.style.display="block"; s.textContent=msg; }
+function fmtEta(sec){
+  if(sec === null || sec === undefined) return "no ETA right now (cluster offline \u2014 the job runs when it returns)";
+  var m = Math.floor(sec/60), r = sec%60;
+  if(m >= 1) return "~"+m+" min"+(r ? " "+r+" s" : "");
+  return "~"+r+" s";
+}
+async function submitCluster(){
+  if(!current.text){
+    var pasted = $("pasteBox").value.trim();
+    if(pasted){ loadIntoView({title: $("pasteTitle").value.trim()||"Pasted post", author:"", text:pasted, sourceUrl:""}); }
+    else { loadSample(); }
+  }
+  var text = current.text;
+  var note = "";
+  if(text.length > 14000){ text = text.slice(0,14000); note = " (Post truncated to ~14,000 characters, as in local mode.)"; }
+  setClusterStatus("Submitting to the cluster queue\u2026"+note);
+  var j;
+  try{
+    var r = await fetch("/api/jobs", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({title: current.title, author: current.author, text: text})
+    });
+    j = await r.json();
+    if(!r.ok){
+      setClusterStatus("The queue refused the job: "+(j.message || j.error || ("HTTP "+r.status)));
+      return;
+    }
+  }catch(e){
+    setClusterStatus("Could not reach the queue ("+e.message+"). Cluster mode only works on the live site, https://moreright.phext.io \u2014 locally, use your own ollama or the demo.");
+    return;
+  }
+  setClusterStatus("Queued as job "+j.id+" \u2014 position "+(j.position||1)+", ETA "+fmtEta(j.eta_seconds)+". Keep this tab open; the mirror appears below when it is done.");
+  pollCluster(j.id);
+}
+function pollCluster(id){
+  if(clusterTimer) clearInterval(clusterTimer);
+  clusterTimer = setInterval(async function(){
+    var j;
+    try{
+      var r = await fetch("/api/jobs/"+id);
+      if(!r.ok) return; /* transient; keep polling */
+      j = await r.json();
+    }catch(e){ return; /* transient; keep polling */ }
+    if(j.status === "queued"){
+      setClusterStatus("Queued \u2014 position "+j.position+" in line, ETA "+fmtEta(j.eta_seconds)+".");
+    } else if(j.status === "running"){
+      setClusterStatus("The cluster is inverting your post now \u2014 ETA "+fmtEta(j.eta_seconds)+".");
+    } else if(j.status === "done"){
+      clearInterval(clusterTimer); clusterTimer = null;
+      if(j.map) showMap(j.map);
+      showMirror("MoreRight: "+(j.title || current.title), j.result,
+        wordCount(j.result)+" words \u00B7 via the MoreRight cluster queue ("+(j.pass1_model||"")+" + "+(j.pass2_model||"")+")");
+      setClusterStatus("Done \u2014 your mirror is below. That took "+Math.round(j.service_seconds||0)+" s of cluster time.");
+    } else if(j.status === "error"){
+      clearInterval(clusterTimer); clusterTimer = null;
+      setClusterStatus("The job failed on the cluster: "+(j.error||"unknown error")+" Your own ollama and the demo above still work.");
+    }
+  }, 5000);
+}
+
 /* ---------- Wire up ---------- */
+$("clusterBtn").addEventListener("click", submitCluster);
 $("fetchBtn").addEventListener("click", fetchPost);
 $("sampleBtn").addEventListener("click", loadSample);
 $("demoBtn").addEventListener("click", runDemo);
